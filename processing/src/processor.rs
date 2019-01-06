@@ -1,9 +1,6 @@
-
-use serde_dyn::{TypeUuid};
-use std::ops::{DerefMut, Deref};
-use downcast::{Any, Downcast, impl_downcast};
-use std::fmt::Debug;
-
+use downcast::{impl_downcast, Any, Downcast};
+use serde_dyn::TypeUuid;
+use std::ops::Deref;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TypeId {
@@ -15,11 +12,19 @@ pub enum TypeId {
 pub trait ProcessorType {
     fn get_processor_type() -> TypeId;
 }
+
 impl<'a, T: TypeUuid> ProcessorType for Arg<'a, T> {
     fn get_processor_type() -> TypeId {
         TypeId::Type(T::UUID)
     }
 }
+
+impl<T: TypeUuid> ProcessorType for &T {
+    fn get_processor_type() -> TypeId {
+        TypeId::Type(T::UUID)
+    }
+}
+
 impl<T: TypeUuid> ProcessorType for Val<T> {
     fn get_processor_type() -> TypeId {
         TypeId::Type(T::UUID)
@@ -32,11 +37,11 @@ impl<T: ProcessorType> ProcessorType for Vec<T> {
     }
 }
 
-pub trait ProcessorObj : Any + Send + Sync {
+pub trait ProcessorObj: Any + Send + Sync {
     fn get_processor_type(&self) -> TypeId;
 }
 impl_downcast!(ProcessorObj);
-impl<T: ProcessorType + Send + Sync + 'static> ProcessorObj for T {
+impl<T: ProcessorType + Any + Send + Sync> ProcessorObj for T {
     fn get_processor_type(&self) -> TypeId {
         T::get_processor_type()
     }
@@ -47,7 +52,7 @@ pub trait ProcessorAccess {
     fn put_write<T: ProcessorObj>(&mut self, index: u32, value: T);
 }
 
-pub trait InputData<'a> {
+pub trait InputData {
     fn get_read<T: ProcessorAccess>(access: &mut T, index: u32) -> Self;
     fn reads() -> Vec<TypeId>;
 }
@@ -57,30 +62,44 @@ pub trait OutputData {
     fn writes() -> Vec<TypeId>;
 }
 
-pub trait Processor<'a> {
-    type Inputs: InputData<'a>;
+pub trait ProcessorDispatch<'a> {
+    type Inputs: InputData;
+    fn dispatch(inputs: Self::Inputs) -> <Self as Processor>::Outputs
+    where
+        Self: Processor;
+}
+
+pub trait Processor {
     type Outputs: OutputData;
     fn name() -> &'static str;
     fn input_names() -> Vec<String>;
     fn output_names() -> Vec<String>;
-    fn run(inputs: Self::Inputs) -> Self::Outputs;
+    fn run<'a>(inputs: <Self as ProcessorDispatch<'a>>::Inputs) -> Self::Outputs
+    where
+        Self: ProcessorDispatch<'a>,
+    {
+        <Self as ProcessorDispatch<'a>>::dispatch(inputs)
+    }
 }
+
 struct AnyProcessorImpl<T> {
     _marker: std::marker::PhantomData<T>,
 }
-unsafe impl<'a, T: Processor<'a>> Send for AnyProcessorImpl<T> {}
-unsafe impl<'a, T: Processor<'a>> Sync for AnyProcessorImpl<T> {}
+unsafe impl<T: Processor> Send for AnyProcessorImpl<T> {}
+unsafe impl<T: Processor> Sync for AnyProcessorImpl<T> {}
 
 pub trait AnyProcessor: Send + Sync {
     fn name(&self) -> &'static str;
     fn input_names(&self) -> Vec<String>;
     fn output_names(&self) -> Vec<String>;
-    fn inputs(&self) -> Vec<TypeId>;
+    fn inputs<'a>(&self) -> Vec<TypeId>;
     fn outputs(&self) -> Vec<TypeId>;
-    fn run(&self, access: &mut ProcessorValues);
+    fn run<'a>(&self, access: &mut ProcessorValues);
 }
-impl<'a, T: 'a> AnyProcessor for AnyProcessorImpl<T>
-where T: Processor<'a> 
+impl<T> AnyProcessor for AnyProcessorImpl<T>
+where
+    T: Processor,
+    T: for<'a> ProcessorDispatch<'a>,
 {
     fn name(&self) -> &'static str {
         T::name()
@@ -91,33 +110,38 @@ where T: Processor<'a>
     fn output_names(&self) -> Vec<String> {
         T::output_names()
     }
-    fn inputs(&self) -> Vec<TypeId> {
-        T::Inputs::reads()
+    fn inputs<'a>(&self) -> Vec<TypeId> {
+        <T as ProcessorDispatch<'a>>::Inputs::reads()
     }
     fn outputs(&self) -> Vec<TypeId> {
         T::Outputs::writes()
     }
-    fn run(&self, access: &mut ProcessorValues) {
+    fn run<'a>(&self, access: &mut ProcessorValues) {
         <T as RunNow>::run_now(access)
     }
 }
-pub fn into_any<'a, T: Processor<'a> + 'a>() -> impl AnyProcessor {
-    AnyProcessorImpl::<T> { _marker: std::marker::PhantomData }
+
+pub fn into_any<T: Processor + for<'a> ProcessorDispatch<'a>>() -> impl AnyProcessor {
+    AnyProcessorImpl::<T> {
+        _marker: std::marker::PhantomData,
+    }
 }
 
 pub trait RunNow {
     fn run_now<T: ProcessorAccess>(access: &mut T);
 }
 impl<'a, T> RunNow for T
-where T: Processor<'a>
+where
+    T: Processor,
+    T: ProcessorDispatch<'a>,
 {
     fn run_now<PA: ProcessorAccess>(access: &mut PA) {
-        let input = T::Inputs::get_read(access, 0);
+        let input = <T as ProcessorDispatch<'a>>::Inputs::get_read(access, 0);
         T::Outputs::put_write(access, 0, T::run(input));
     }
 }
 
-impl<'a> InputData<'a> for () {
+impl InputData for () {
     fn get_read<T: ProcessorAccess>(_: &mut T, _: u32) -> Self {
         ()
     }
@@ -127,8 +151,7 @@ impl<'a> InputData<'a> for () {
     }
 }
 
-impl<'a, T: TypeUuid + Send + Sync + 'static> InputData<'a> for Arg<'a, T>
-{
+impl<'a, T: TypeUuid + Send + Sync + 'static> InputData for Arg<'a, T> {
     fn get_read<P: ProcessorAccess>(access: &mut P, idx: u32) -> Self {
         <P as ProcessorAccess>::get_read(access, idx)
     }
@@ -138,8 +161,17 @@ impl<'a, T: TypeUuid + Send + Sync + 'static> InputData<'a> for Arg<'a, T>
     }
 }
 
-impl<'a, T: ProcessorType + 'static + Send + Sync> InputData<'a> for Vec<T>
-{
+impl<'a, T: TypeUuid + Send + Sync + 'static> InputData for &'a T {
+    fn get_read<P: ProcessorAccess>(access: &mut P, idx: u32) -> Self {
+        <P as ProcessorAccess>::get_read(access, idx)
+    }
+
+    fn reads() -> Vec<TypeId> {
+        vec![<Arg<T> as ProcessorType>::get_processor_type()]
+    }
+}
+
+impl<T: ProcessorType + Send + Sync + 'static> InputData for Vec<T> {
     fn get_read<P: ProcessorAccess>(access: &mut P, idx: u32) -> Self {
         <P as ProcessorAccess>::get_read(access, idx)
     }
@@ -170,9 +202,7 @@ impl<T: ProcessorType + Send + Sync + 'static> OutputData for Vec<T> {
 }
 
 impl OutputData for () {
-    fn put_write<T: ProcessorAccess>(_: &mut T, _: u32, _: Self) {
-        
-    }
+    fn put_write<T: ProcessorAccess>(_: &mut T, _: u32, _: Self) {}
 
     fn writes() -> Vec<TypeId> {
         Vec::new()
@@ -189,8 +219,7 @@ impl<T> From<T> for Val<T> {
     }
 }
 
-impl<T> Deref for Val<T>
-{
+impl<T> Deref for Val<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -198,34 +227,33 @@ impl<T> Deref for Val<T>
     }
 }
 
-pub struct Arg<'a, T: 'static> {
+pub struct Arg<'a, T> {
     inner: &'a T,
 }
 
-impl<'a, T: 'a> From<&'a T> for Arg<'a, T> {
+impl<'a, T> From<&'a T> for Arg<'a, T> {
     fn from(v: &'a T) -> Arg<'a, T> {
         Arg { inner: v }
     }
 }
 
-impl<'a, T: 'a> Deref for Arg<'a, T>
-{
-    type Target = T;
+// impl<'a, T> Deref for Arg<'a, T> {
+//     type Target = &'a T;
 
-    fn deref(&self) -> &T {
-        self.inner
-    }
-}
+//     fn deref(&self) -> &&'a T {
+//         &self.inner
+//     }
+// }
 
 macro_rules! impl_inputs {
     ( $($ty:ident, $idx:expr),* ) => {
-        impl<'a, $($ty),*> InputData<'a> for ( $( $ty , )* )
-            where $( $ty : InputData<'a>),*
+        impl<$($ty),*> InputData for ( $( $ty , )* )
+            where $( $ty : InputData),*
             {
                 fn get_read<PA: ProcessorAccess>(access: &mut PA, index: u32) -> Self {
                     #![allow(unused_variables)]
 
-                    ( $( <$ty as InputData>::get_read(access, $idx), ) *) 
+                    ( $( <$ty as InputData>::get_read(access, $idx), ) *)
                 }
 
                 fn reads() -> Vec<TypeId> {
@@ -323,7 +351,10 @@ pub struct ProcessorValues {
 
 impl ProcessorValues {
     pub fn new(inputs: Vec<Option<Box<ProcessorObj>>>) -> ProcessorValues {
-        ProcessorValues { inputs: inputs, outputs: Vec::new() }
+        ProcessorValues {
+            inputs: inputs,
+            outputs: Vec::new(),
+        }
     }
     pub fn outputs(&self) -> &Vec<Option<Box<ProcessorObj>>> {
         &self.outputs
@@ -341,16 +372,14 @@ impl ProcessorAccess for ProcessorValues {
         self.outputs.insert(index as usize, Some(Box::new(value)));
     }
 }
+
 pub struct IOData {
     pub value: Option<Box<ProcessorObj>>,
     pub name: String,
 }
 impl IOData {
     pub fn new(name: String, value: Option<Box<ProcessorObj>>) -> IOData {
-        IOData {
-            value, 
-            name,
-        }
+        IOData { value, name }
     }
 }
 pub struct ConstantProcessor {
@@ -363,12 +392,55 @@ impl ConstantProcessor {
 }
 
 impl AnyProcessor for ConstantProcessor {
-     fn name(&self) -> &'static str { "Constants" }
-     fn input_names(&self) -> Vec<String> { vec![] }
-     fn output_names(&self) -> Vec<String> { self.outputs.iter().map(|d| d.name.clone()).collect() }
-     fn inputs(&self) -> Vec<TypeId> { vec![] }
-     fn outputs(&self) -> Vec<TypeId> { self.outputs.iter().filter(|d| d.value.is_some()).map(|d| ProcessorObj::get_processor_type(d.value.as_ref().unwrap().as_ref())).collect() }
-     fn run(&self, _access: &mut ProcessorValues) {}
+    fn name(&self) -> &'static str {
+        "Constants"
+    }
+    fn input_names(&self) -> Vec<String> {
+        vec![]
+    }
+    fn output_names(&self) -> Vec<String> {
+        self.outputs.iter().map(|d| d.name.clone()).collect()
+    }
+    fn inputs(&self) -> Vec<TypeId> {
+        vec![]
+    }
+    fn outputs(&self) -> Vec<TypeId> {
+        self.outputs
+            .iter()
+            .filter(|d| d.value.is_some())
+            .map(|d| ProcessorObj::get_processor_type(d.value.as_ref().unwrap().as_ref()))
+            .collect()
+    }
+    fn run(&self, _access: &mut ProcessorValues) {}
+}
+
+struct ABC;
+impl<'a> ProcessorDispatch<'a> for ABC {
+    type Inputs = (Vec<&'a f32>, &'a u16);
+    fn dispatch((f, b): Self::Inputs) -> <Self as Processor>::Outputs
+    where
+        Self: Processor,
+    {
+        let mut total = 0u32;
+        for x in f.iter() {
+            total += **x as u32;
+        }
+        total += *b as u32;
+        (Val::from(total), Val::from(88u16))
+    }
+}
+
+impl Processor for ABC {
+    fn name() -> &'static str {
+        "ABC"
+    }
+    fn input_names() -> Vec<String> {
+        vec!["f", "b"].iter().map(|d| d.to_string()).collect()
+    }
+    fn output_names() -> Vec<String> {
+        vec!["g", "c"].iter().map(|d| d.to_string()).collect()
+    }
+    type Outputs = (Val<u32>, Val<u16>);
 }
 
 #[cfg(test)]
@@ -377,16 +449,21 @@ mod tests {
     use serde_dyn::uuid;
     use std::marker::PhantomData;
 
-    uuid!{
+    uuid! {
         ABC => 14092692613983100637224012401022025107
     }
 
-    struct ABC {
-    }
+    struct ABC {}
     impl<'a> Processor<'a> for ABC {
-        fn name() -> &'static str { "ABC" }
-        fn input_names() -> Vec<String> { vec!["f", "b"].iter().map(|d| d.to_string()).collect() }
-        fn output_names() -> Vec<String> { vec!["g", "c"].iter().map(|d| d.to_string()).collect() }
+        fn name() -> &'static str {
+            "ABC"
+        }
+        fn input_names() -> Vec<&'static str> {
+            vec!["f", "b"]
+        }
+        fn output_names() -> Vec<String> {
+            vec!["g", "c"].iter().map(|d| d.to_string()).collect()
+        }
         type Inputs = (Vec<Arg<'a, f32>>, Arg<'a, u16>);
         type Outputs = (Val<u32>, Val<u16>);
         fn run((f, b): Self::Inputs) -> Self::Outputs {
@@ -394,16 +471,24 @@ mod tests {
             for x in f.iter() {
                 total += **x as u32;
             }
-            total += **b as u32;
+            total += *b as u32;
             (Val::from(total), Val::from(88u16))
         }
     }
 
     #[test]
     fn test() {
-        let mut values = ProcessorValues::new(vec![ Some(Box::new(vec![Arg::from(3.2f32)])), Some(Box::new(Arg::from(2u16))) ]);
+        let mut values = ProcessorValues::new(vec![
+            Some(Box::new(vec![Arg::from(3.2f32)])),
+            Some(Box::new(Arg::from(2u16))),
+        ]);
         ABC::run_now(&mut values);
         let out = values.outputs.remove(0).unwrap();
-        println!("{}", Downcast::<Arg<u32>>::downcast_ref(out.as_ref()).unwrap().inner);
+        println!(
+            "{}",
+            Downcast::<Arg<u32>>::downcast_ref(out.as_ref())
+                .unwrap()
+                .inner
+        );
     }
 }

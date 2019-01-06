@@ -6,6 +6,7 @@ edition = "2018"
 [dependencies]
 schema = { path = "schema" }
 importer = { path = "importer" }
+processing = { path = "processing" }
 # capnp = "0.9.0"
 capnp = { git = "http://github.com/capnproto/capnproto-rust", branch = "master", features = ["rpc_try"]}
 notify = "4.0.0"

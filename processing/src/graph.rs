@@ -1,9 +1,8 @@
-
+use crate::processor::ProcessorDispatch;
+use crate::processor::{self, AnyProcessor, Processor, ProcessorObj, ProcessorValues, TypeId};
 use petgraph;
-use std::collections::{HashMap};
-use std::marker::PhantomData;
+use std::collections::HashMap;
 use std::fmt;
-use crate::processor::{self, Processor, AnyProcessor, TypeId, ProcessorObj, ProcessorValues};
 
 #[derive(Copy, Ord, PartialOrd, PartialEq, Eq, Clone, Hash, Debug)]
 pub struct NodeId(u32);
@@ -12,7 +11,9 @@ type ArgId = (NodeId, ArgIndex);
 type NodeGraph = petgraph::graphmap::GraphMap<NodeId, NodeEdge, DirectedEdgeType>;
 struct DirectedEdgeType;
 impl petgraph::EdgeType for DirectedEdgeType {
-    fn is_directed() -> bool { true }
+    fn is_directed() -> bool {
+        true
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -21,8 +22,16 @@ pub struct NodeEdge {
     to: ArgId,
 }
 impl NodeEdge {
-    pub fn new(from_node: NodeId, from_arg: ArgIndex, to_node: NodeId, to_arg: ArgIndex) -> NodeEdge {
-        NodeEdge { from: (from_node, from_arg), to: (to_node, to_arg) }
+    pub fn new(
+        from_node: NodeId,
+        from_arg: ArgIndex,
+        to_node: NodeId,
+        to_arg: ArgIndex,
+    ) -> NodeEdge {
+        NodeEdge {
+            from: (from_node, from_arg),
+            to: (to_node, to_arg),
+        }
     }
 }
 pub struct Node {
@@ -34,12 +43,25 @@ impl Node {
         Node { id, processor }
     }
     pub fn from_constants(id: NodeId, values: Vec<processor::IOData>) -> Node {
-        Node { id, processor: Box::new(processor::ConstantProcessor::new(values)) }
+        Node {
+            id,
+            processor: Box::new(processor::ConstantProcessor::new(values)),
+        }
     }
-    pub fn from_processor<'a, T: Processor<'a> + 'static>(id: NodeId) -> Node {
-        Node { id, processor: Box::new(processor::into_any::<T>()) }
+    pub fn from_processor<T: Processor + for<'a> ProcessorDispatch<'a> + 'static>(
+        id: NodeId,
+    ) -> Node {
+        Node {
+            id,
+            processor: Box::new(processor::into_any::<T>()),
+        }
     }
-    pub fn make_edge(from: & Node, from_arg: &'static str, to: &Node, to_arg: &'static str) -> Result<NodeEdge> {
+    pub fn make_edge(
+        from: &Node,
+        from_arg: &'static str,
+        to: &Node,
+        to_arg: &'static str,
+    ) -> Result<NodeEdge> {
         let mut from_idx = None;
         for (idx, name) in from.processor.output_names().iter().enumerate() {
             if *name == from_arg {
@@ -47,7 +69,7 @@ impl Node {
             }
         }
         if None == from_idx {
-            return Err(Error::ArgNameNotFound(from.id, from_arg))
+            return Err(Error::ArgNameNotFound(from.id, from_arg));
         }
         let mut to_idx = None;
         for (idx, name) in to.processor.input_names().iter().enumerate() {
@@ -56,9 +78,12 @@ impl Node {
             }
         }
         if None == to_idx {
-            return Err(Error::ArgNameNotFound(to.id, to_arg))
+            return Err(Error::ArgNameNotFound(to.id, to_arg));
         }
-        Ok(NodeEdge { from: (from.id, from_idx.unwrap()), to: (to.id, to_idx.unwrap()) })
+        Ok(NodeEdge {
+            from: (from.id, from_idx.unwrap()),
+            to: (to.id, to_idx.unwrap()),
+        })
     }
 }
 
@@ -69,10 +94,14 @@ pub struct Graph {
 }
 impl Graph {
     pub fn execute(&mut self, root: NodeId) {
-        let mut outputs: HashMap<NodeId, Vec<Option<Box<ProcessorObj>>>> = HashMap::new();
+        let outputs: HashMap<NodeId, Vec<Option<Box<ProcessorObj>>>> = HashMap::new();
         for node_id in self.execution_order.iter() {
-            let mut inputs: Vec<Option<Box<ProcessorObj>>> = Vec::new();
-            for (_, _, e) in self.graph.edges(*node_id).filter(|(_,_, e)| e.to.0 == *node_id) {
+            let inputs: Vec<Option<Box<ProcessorObj>>> = Vec::new();
+            for (_, _, e) in self
+                .graph
+                .edges(*node_id)
+                .filter(|(_, _, e)| e.to.0 == *node_id)
+            {
                 // inputs.push(outputs[&e.from.0][e.from.1].clone());
             }
             let mut values = ProcessorValues::new(inputs);
@@ -80,14 +109,12 @@ impl Graph {
             node.processor.run(&mut values);
             // outputs[&node_id] = values.outputs();
         }
-
     }
 }
 pub struct GraphBuilder {
     nodes: Vec<Node>,
     edges: Vec<NodeEdge>,
 }
-
 
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
@@ -143,10 +170,12 @@ impl From<petgraph::algo::Cycle<NodeId>> for Error {
     }
 }
 
-
 impl GraphBuilder {
     pub fn new() -> Self {
-        GraphBuilder { nodes: Vec::new(), edges: Vec::new() }
+        GraphBuilder {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
     }
     pub fn add_node(mut self, node: Node) -> Self {
         self.nodes.push(node);
@@ -163,23 +192,27 @@ impl GraphBuilder {
             nodes_by_id.insert(node.id, node);
         }
         for edge in self.edges.iter() {
-            let from_node = nodes_by_id.get(&edge.from.0).ok_or_else(|| Error::NodeNotFound(*edge))?;
-            let to_node = nodes_by_id.get(&edge.to.0).ok_or_else(|| Error::NodeNotFound(*edge))?;
+            let from_node = nodes_by_id
+                .get(&edge.from.0)
+                .ok_or_else(|| Error::NodeNotFound(*edge))?;
+            let to_node = nodes_by_id
+                .get(&edge.to.0)
+                .ok_or_else(|| Error::NodeNotFound(*edge))?;
             if from_node.id == to_node.id {
-                return Err(Error::SelfReference(*edge))
+                return Err(Error::SelfReference(*edge));
             }
             let outputs = from_node.processor.outputs();
             let inputs = to_node.processor.inputs();
             if edge.from.1 >= outputs.len() {
-                return Err(Error::ArgNotFound(*edge))
+                return Err(Error::ArgNotFound(*edge));
             }
             if edge.to.1 >= inputs.len() {
-                return Err(Error::ArgNotFound(*edge))
+                return Err(Error::ArgNotFound(*edge));
             }
             if outputs[edge.from.1] != inputs[edge.to.1] {
                 let from_type = outputs[edge.from.1].clone();
                 let to_type = inputs[edge.to.1].clone();
-                return Err(Error::TypeMismatch(*edge, from_type, to_type))
+                return Err(Error::TypeMismatch(*edge, from_type, to_type));
             }
         }
         let mut graph = NodeGraph::new();
@@ -189,32 +222,46 @@ impl GraphBuilder {
             node_refs.insert(node.id, node);
         }
         for edge in self.edges {
-            println!("adding edge from {:?} to {:?}",edge.from, edge.to);
+            println!("adding edge from {:?} to {:?}", edge.from, edge.to);
             graph.add_edge(edge.from.0, edge.to.0, edge);
         }
         let sorted = petgraph::algo::toposort(&graph, None)?;
-            println!("got {} edges and {} nodes", graph.edge_count(), graph.node_count());
-        Ok(Graph { graph: graph, nodes: node_refs, execution_order: sorted, })
+        println!(
+            "got {} edges and {} nodes",
+            graph.edge_count(),
+            graph.node_count()
+        );
+        Ok(Graph {
+            graph: graph,
+            nodes: node_refs,
+            execution_order: sorted,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_dyn::uuid;
-    use crate::processor::{self, Arg, Val, Processor, ProcessorValues, RunNow};
+    use crate::processor::{self, Arg, Processor, ProcessorValues, RunNow, Val};
     use downcast::Downcast;
+    use serde_dyn::uuid;
 
-    uuid!{
+    uuid! {
         First => 14092692613983100637224012401022025107,
         Second => 14092692613983100637224012401022025108
     }
 
     struct First;
     impl<'a> Processor<'a> for First {
-        fn name() -> &'static str { "First" }
-        fn input_names() -> Vec<String> { vec!["i"].iter().map(|d| d.to_string()).collect() }
-        fn output_names() -> Vec<String> { vec!["g", "c"].iter().map(|d| d.to_string()).collect() }
+        fn name() -> &'static str {
+            "First"
+        }
+        fn input_names() -> Vec<String> {
+            vec!["i"].iter().map(|d| d.to_string()).collect()
+        }
+        fn output_names() -> Vec<String> {
+            vec!["g", "c"].iter().map(|d| d.to_string()).collect()
+        }
         type Inputs = (Arg<'a, u32>);
         type Outputs = (Val<u32>, Vec<Val<u16>>);
         fn run((i): Self::Inputs) -> Self::Outputs {
@@ -225,9 +272,15 @@ mod tests {
     }
     struct Second;
     impl<'a> Processor<'a> for Second {
-        fn name() -> &'static str { "Second" }
-        fn input_names() -> Vec<String> { vec!["f", "b"].iter().map(|d| d.to_string()).collect() }
-        fn output_names() -> Vec<String> { vec!["g", "c"].iter().map(|d| d.to_string()).collect() }
+        fn name() -> &'static str {
+            "Second"
+        }
+        fn input_names() -> Vec<String> {
+            vec!["f", "b"].iter().map(|d| d.to_string()).collect()
+        }
+        fn output_names() -> Vec<String> {
+            vec!["g", "c"].iter().map(|d| d.to_string()).collect()
+        }
         type Inputs = (Arg<'a, u32>, Vec<Arg<'a, u16>>);
         type Outputs = (Val<u32>, Val<u16>);
         fn run((i, _f): Self::Inputs) -> Self::Outputs {
@@ -239,13 +292,27 @@ mod tests {
 
     #[test]
     fn test() {
-        let graph_inputs = Node::from_constants(NodeId(0), vec![ processor::IOData::new("a".to_string(), Some(Box::new(Arg::from(15u32)))) ] );
+        let graph_inputs = Node::from_constants(
+            NodeId(0),
+            vec![processor::IOData::new(
+                "a".to_string(),
+                Some(Box::new(Arg::from(15u32))),
+            )],
+        );
         let first_node = Node::from_processor::<First>(NodeId(1));
         let second_node = Node::from_processor::<Second>(NodeId(2));
         let edge0 = Node::make_edge(&graph_inputs, "a", &first_node, "i").unwrap();
         let edge1 = Node::make_edge(&first_node, "g", &second_node, "f").unwrap();
         let edge2 = Node::make_edge(&first_node, "c", &second_node, "b").unwrap();
-        let mut graph = GraphBuilder::new().add_node(graph_inputs).add_edge(edge0).add_edge(edge1).add_edge(edge2).add_node(first_node).add_node(second_node).build().unwrap();
+        let mut graph = GraphBuilder::new()
+            .add_node(graph_inputs)
+            .add_edge(edge0)
+            .add_edge(edge1)
+            .add_edge(edge2)
+            .add_node(first_node)
+            .add_node(second_node)
+            .build()
+            .unwrap();
         graph.execute(NodeId(0));
     }
 }
